@@ -22,7 +22,16 @@ public class Item {
     private String name;
     private String description;
     private String status;
-
-    // Add email regex validation
     private String email;
+
+    public void setEmail(String email) {
+        if(email == null || email.isEmpty()){
+            throw new IllegalArgumentException("Email cannot be null or empty");
+        }
+        if (!email.matches("^[A-Za-z][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._-]*\\.[A-Za-z]+$")) {
+            throw new IllegalArgumentException("Invalid email format");
+        }
+        this.email = email;
+    }
+
 }
