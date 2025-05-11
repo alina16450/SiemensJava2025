@@ -4,18 +4,22 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Queue;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
 
 @Service
 public class ItemService {
     @Autowired
     private ItemRepository itemRepository;
-    private static ExecutorService executor = Executors.newFixedThreadPool(10);
-    private List<Item> processedItems = new ArrayList<>();
-    private int processedCount = 0;
+    private static final ExecutorService executor = Executors.newFixedThreadPool(10);
+
+    //modified processedItems and processedCount to be thread safe
+    private final Queue<Item> processedItems = new ConcurrentLinkedQueue<>();
+    private final AtomicInteger processedCount = new AtomicInteger(0);
 
 
     public List<Item> findAll() {
@@ -34,54 +38,78 @@ public class ItemService {
         itemRepository.deleteById(id);
     }
 
+    /**
+     * Processes a single item by its ID.
+     * <p>
+     * This method simulates processing delay, retrieves the item from the database,
+     * updates its status to "PROCESSED", saves the updated item, and returns it.
+     * Throws an exception if the item is not found or the thread is interrupted.
+     *
+     * @param itemId the ID of the item to process
+     * @return the processed and saved {@link Item}
+     * @throws RuntimeException if the item is not found or thread is interrupted
+     */
+    public Item processItem(Long itemId) {
+        try{
+            Thread.sleep(100);
+            return itemRepository.findById(itemId).map(item ->
+            {item.setStatus("PROCESSED");
+            return itemRepository.save(item);
+            }).orElseThrow(() -> new RuntimeException("Item not found"));
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while processing Item " + itemId);
+        }
+    }
 
     /**
-     * Your Tasks
-     * Identify all concurrency and asynchronous programming issues in the code
-     * Fix the implementation to ensure:
-     * All items are properly processed before the CompletableFuture completes
-     * Thread safety for all shared state
-     * Proper error handling and propagation
-     * Efficient use of system resources
-     * Correct use of Spring's @Async annotation
-     * Add appropriate comments explaining your changes and why they fix the issues
-     * Write a brief explanation of what was wrong with the original implementation
+     * Asynchronously processes all items in the database.
+     * <p>
+     * This method retrieves all item IDs, launches a separate async task to
+     * process each item, waits for all tasks to complete, then collects and
+     * returns a list of all successfully processed items.
+     * All shared state (such as the processed item list and count) is safely updated.
      *
-     * Hints
-     * Consider how CompletableFuture composition can help coordinate multiple async operations
-     * Think about appropriate thread-safe collections
-     * Examine how errors are handled and propagated
-     * Consider the interaction between Spring's @Async and CompletableFuture
+     * @return a {@link CompletableFuture} containing the list of all processed {@link Item} objects
+     * @throws RuntimeException if any task fails during processing
      */
     @Async
-    public List<Item> processItemsAsync() {
+    public CompletableFuture<List<Item>> processItemsAsync() {
 
         List<Long> itemIds = itemRepository.findAllIds();
 
-        for (Long id : itemIds) {
-            CompletableFuture.runAsync(() -> {
-                try {
-                    Thread.sleep(100);
+        //launch one async task per item using supplyAsync to ensure each task is awaited and collected into list
+        List<CompletableFuture<Item>> futures = itemIds.stream().map(id->
+                CompletableFuture.supplyAsync(() -> processItem(id), executor)).
+                toList();
 
-                    Item item = itemRepository.findById(id).orElse(null);
-                    if (item == null) {
-                        return;
-                    }
-
-                    processedCount++;
-
-                    item.setStatus("PROCESSED");
-                    itemRepository.save(item);
-                    processedItems.add(item);
-
-                } catch (InterruptedException e) {
-                    System.out.println("Error: " + e.getMessage());
-                }
-            }, executor);
-        }
-
-        return processedItems;
+        //use allOf to ensure we wait for all item-processing futures to complete
+        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).thenApply(v-> {
+           synchronized (this) {
+               futures.forEach(f->{
+                   try {
+                       Item item = f.join();
+                       processedItems.add(item);
+                       processedCount.incrementAndGet();
+                   } catch (Exception e) {
+                       throw new RuntimeException(e);
+                   }
+               });
+               return List.copyOf(processedItems);
+           }
+        });
     }
+    /**
+     * There were a few problems with the original implementation that prevented the program from working correctly:
+     * First, processedItems and processedCount were simple array and int variables, which are not thread safe.
+     * They can be modified from multiple threads without synchronization.
+     * Second, processItemsAsync used runAsync() which does launch tasks, but it does not ensure they are completed.
+     * The method immediately returned processedItems, and some items may not have had time to finish processing.
+     * There was also poor error handling, as the exceptions were printed and not logged properly.
+     * Third was the way processItems() was set up. The return type was not ideal for async responses, as it treated it
+     * like a synchronous call and did not have any logic in place to ensure the response was completed.
+     * It also had no error handling.*/
 
 }
 
